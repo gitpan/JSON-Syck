@@ -23,11 +23,10 @@ my @tests = (
     '{"foo": "bar"}',
     '{"foo":"bar"}',
     '[{"foo": 2}, {"foo": "bar"}]',
+    qq("\xe5\xaa\xbe"),
 );
 
 plan tests => scalar @tests * (1 + $HAS_JSON);
-
-my $conv = $HAS_JSON ? JSON::Converter->new : undef;
 
 for my $test (@tests) {
     my $data = eval { JSON::Syck::Load($test) };
@@ -37,7 +36,10 @@ for my $test (@tests) {
     for ($test, $json) {
         s/([,:]) /$1/eg;
     }
-    is $json, $test, "roundtrip $test -> " . Dumper($data) . " -> $json";
+
+    my $desc = "roundtrip $test -> " . Dumper($data) . " -> $json";
+    utf8::encode($desc);
+    is $json, $test, $desc;
 
     # try parsing the data with JSON.pm
     if ($HAS_JSON) {
