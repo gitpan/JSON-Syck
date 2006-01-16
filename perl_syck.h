@@ -9,20 +9,27 @@
 #define NEED_newRV_noinc
 #include "ppport.h"
 #include "ppport_math.h"
+#include "ppport_sort.h"
 
 #undef DEBUG /* maybe defined in perl.h */
 #include <syck.h>
+
+#ifndef newSVpvn_share
+#define newSVpvn_share(x, y, z) newSVpvn(x, y)
+#endif
 
 #ifdef YAML_IS_JSON
 #  define PACKAGE_NAME  "JSON::Syck"
 #  define NULL_LITERAL  "null"
 #  define SCALAR_NUMBER scalar_none
-#  define SCALAR_STRING scalar_2quote
-#  define SCALAR_QUOTED scalar_2quote
+char json_quote_char = '"';
+static enum scalar_style json_quote_style = scalar_2quote;
+#  define SCALAR_STRING json_quote_style
+#  define SCALAR_QUOTED json_quote_style
 #  define SCALAR_UTF8   scalar_fold
 #  define SEQ_NONE      seq_inline
 #  define MAP_NONE      map_inline
-#  define COND_FOLD(x)  1
+#  define COND_FOLD(x)  TRUE
 #  define TYPE_IS_NULL(x) ((x == NULL) || (strcmp( x, "str" ) == 0))
 #  define OBJOF(a)        (a)
 #else
@@ -34,7 +41,7 @@
 #  define SCALAR_UTF8   scalar_fold
 #  define SEQ_NONE      seq_none
 #  define MAP_NONE      map_none
-#  define COND_FOLD(x)  (SvUTF8(sv)
+#  define COND_FOLD(x)  (SvUTF8(sv))
 #  define TYPE_IS_NULL(x) (x == NULL)
 #  define OBJOF(a)        (*tag ? tag : a)
 #endif
@@ -175,7 +182,15 @@ SYMID perl_syck_parser_handler(SyckParser *p, SyckNode *n) {
             sv = newRV_noinc((SV*)seq);
 #ifndef YAML_IS_JSON
             if (n->type_id) {
-                sv_bless(sv, gv_stashpv(n->type_id + 6, TRUE));
+                char *lang = strtok(n->type_id, "/:");
+                char *type = strtok(NULL, "");
+                while ((type != NULL) && *type == '@') { type++; }
+
+                if (lang == NULL || (strcmp(lang, "perl") == 0)) {
+                    sv_bless(sv, gv_stashpv(type, TRUE));
+                } else {
+                    sv_bless(sv, gv_stashpv(form("%s::%s", lang, type), TRUE));
+                }
             }
 #endif
         break;
@@ -200,7 +215,13 @@ SYMID perl_syck_parser_handler(SyckParser *p, SyckNode *n) {
                 sv = newRV_noinc((SV*)map);
 #ifndef YAML_IS_JSON
                 if (n->type_id) {
-                    sv_bless(sv, gv_stashpv(n->type_id + 5, TRUE));
+                    char *lang = strtok(n->type_id, "/:");
+                    char *type = strtok(NULL, "");
+                    if (lang == NULL || (strcmp(lang, "perl") == 0)) {
+                        sv_bless(sv, gv_stashpv(type, TRUE));
+                    } else {
+                        sv_bless(sv, gv_stashpv(form("%s::%s", lang, type), TRUE));
+                    }
                 }
 #endif
             }
@@ -276,6 +297,7 @@ void perl_syck_error_handler(SyckParser *p, char *msg) {
         msg ));
 }
 
+#ifdef YAML_IS_JSON
 static char* perl_json_preprocess(char *s) {
     int i;
     char *out;
@@ -294,7 +316,7 @@ static char* perl_json_preprocess(char *s) {
         if (in_quote) {
             in_quote = !in_quote;
         }
-        else if (ch == '\"') {
+        else if (ch == json_quote_char) {
             in_string = !in_string;
         }
         else if ((ch == ':' || ch == ',') && !in_string) {
@@ -324,7 +346,7 @@ void perl_json_postprocess(SV *sv) {
         if (in_quote) {
             in_quote = !in_quote;
         }
-        else if (ch == '\"') {
+        else if (ch == json_quote_char) {
             in_string = !in_string;
         }
         else if ((ch == ':' || ch == ',') && !in_string) {
@@ -340,6 +362,7 @@ void perl_json_postprocess(SV *sv) {
     *pos = '\0';
     SvCUR_set(sv, final_len);
 }
+#endif
 
 static SV * Load(char *s) {
     SYMID v;
@@ -347,6 +370,11 @@ static SV * Load(char *s) {
     SV *obj = &PL_sv_undef;
     SV *implicit = GvSV(gv_fetchpv(form("%s::ImplicitTyping", PACKAGE_NAME), TRUE, SVt_PV));
     SV *unicode = GvSV(gv_fetchpv(form("%s::ImplicitUnicode", PACKAGE_NAME), TRUE, SVt_PV));
+#ifdef YAML_IS_JSON
+    SV *singlequote = GvSV(gv_fetchpv(form("%s::SingleQuote", PACKAGE_NAME), TRUE, SVt_PV));
+    json_quote_char = (SvTRUE(singlequote) ? '\'' : '"' );
+    json_quote_style = (SvTRUE(singlequote) ? scalar_1quote : scalar_2quote );
+#endif
 
     /* Don't even bother if the string is empty. */
     if (*s == '\0') { return &PL_sv_undef; }
@@ -363,7 +391,7 @@ static SV * Load(char *s) {
     syck_parser_implicit_typing(parser, SvTRUE(implicit));
     syck_parser_taguri_expansion(parser, 0);
 
-    parser->bonus = (void*)SvTRUE(unicode);
+    parser->bonus = (void*)(SvTRUE(unicode) ? unicode : NULL);
 
     v = syck_parse(parser);
     syck_lookup_sym(parser, v, (char **)&obj);
@@ -486,6 +514,7 @@ void perl_syck_emitter_handler(SyckEmitter *e, st_data_t data) {
             return;
         }
         case SVt_PVHV: {
+            HV *hv = (HV*)sv;
             syck_emit_map(e, OBJOF("hash"), MAP_NONE);
             *tag = '\0';
 #ifdef HAS_RESTRICTED_HASHES
@@ -494,17 +523,48 @@ void perl_syck_emitter_handler(SyckEmitter *e, st_data_t data) {
             len = HvKEYS((HV*)sv);
 #endif
             hv_iterinit((HV*)sv);
-            for (i = 0; i < len; i++) {
-#ifdef HV_ITERNEXT_WANTPLACEHOLDERS
-                HE *he = hv_iternext_flags((HV*)sv, HV_ITERNEXT_WANTPLACEHOLDERS);
+
+            if (e->sort_keys) {
+		AV *av = newAV();
+		for (i = 0; i < len; i++) {
+#ifdef HAS_RESTRICTED_HASHES
+                    HE *he = hv_iternext_flags(hv, HV_ITERNEXT_WANTPLACEHOLDERS);
 #else
-                HE *he = hv_iternext((HV*)sv);
+                    HE *he = hv_iternext(hv);
 #endif
-                I32 keylen;
-                SV *key = hv_iterkeysv(he);
-                SV *val = hv_iterval((HV*)sv, he);
-                syck_emit_item( e, (st_data_t)key );
-                syck_emit_item( e, (st_data_t)val );
+                    SV *key = hv_iterkeysv(he);
+                    av_store(av, AvFILLp(av)+1, key);	/* av_push(), really */
+		}
+		STORE_HASH_SORT;
+		for (i = 0; i < len; i++) {
+#ifdef HAS_RESTRICTED_HASHES
+                    int placeholders = (int)HvPLACEHOLDERS_get(hv);
+#endif
+                    unsigned char flags = 0;
+                    char *keyval;
+                    STRLEN keylen_tmp;
+                    I32 keylen;
+                    SV *key = av_shift(av);
+                    HE *he  = hv_fetch_ent(hv, key, 0, 0);
+                    SV *val = HeVAL(he);
+                    if (val == NULL) { val = &PL_sv_undef; }
+                    syck_emit_item( e, (st_data_t)key );
+                    syck_emit_item( e, (st_data_t)val );
+                }
+            }
+            else {
+                for (i = 0; i < len; i++) {
+#ifdef HV_ITERNEXT_WANTPLACEHOLDERS
+                    HE *he = hv_iternext_flags(hv, HV_ITERNEXT_WANTPLACEHOLDERS);
+#else
+                    HE *he = hv_iternext(hv);
+#endif
+                    I32 keylen;
+                    SV *key = hv_iterkeysv(he);
+                    SV *val = hv_iterval(hv, he);
+                    syck_emit_item( e, (st_data_t)key );
+                    syck_emit_item( e, (st_data_t)val );
+                }
             }
             syck_emit_end(e);
             return;
@@ -535,8 +595,15 @@ SV* Dump(SV *sv) {
     SyckEmitter *emitter = syck_new_emitter();
     SV *headless = GvSV(gv_fetchpv(form("%s::Headless", PACKAGE_NAME), TRUE, SVt_PV));
     SV *unicode = GvSV(gv_fetchpv(form("%s::ImplicitUnicode", PACKAGE_NAME), TRUE, SVt_PV));
+    SV *sortkeys = GvSV(gv_fetchpv(form("%s::SortKeys", PACKAGE_NAME), TRUE, SVt_PV));
+#ifdef YAML_IS_JSON
+    SV *singlequote = GvSV(gv_fetchpv(form("%s::SingleQuote", PACKAGE_NAME), TRUE, SVt_PV));
+    json_quote_char = (SvTRUE(singlequote) ? '\'' : '"' );
+    json_quote_style = (SvTRUE(singlequote) ? scalar_1quote : scalar_2quote );
+#endif
 
     emitter->headless = SvTRUE(headless);
+    emitter->sort_keys = SvTRUE(sortkeys);
     emitter->anchor_format = "%d";
 
     bonus = emitter->bonus = S_ALLOC_N(struct emitter_xtra, 1);
