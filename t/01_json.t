@@ -24,6 +24,12 @@ my @tests = (
     '{"foo":"bar"}',
     '[{"foo": 2}, {"foo": "bar"}]',
     qq("\xe5\xaa\xbe"),
+    'null',
+    '{"foo":null}',
+    '""',
+    '[null,null]',
+    '["",null]',
+    '{"foo":""}',
 );
 
 plan tests => scalar @tests * (1 + $HAS_JSON) * 2;
@@ -46,7 +52,7 @@ for my $unicode (0, 1) {
 
         # try parsing the data with JSON.pm
         if ($HAS_JSON) {
-            utf8::encode($data) if !ref($data) && $unicode;
+            utf8::encode($data) if defined($data) && !ref($data) && $unicode;
             my $data_pp = eval { JSON::jsonToObj($json) };
             is_deeply $data_pp, $data, "compatibility with JSON.pm $test";
         }
