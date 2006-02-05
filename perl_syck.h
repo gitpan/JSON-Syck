@@ -318,6 +318,9 @@ static char* perl_json_preprocess(char *s) {
         if (in_quote) {
             in_quote = !in_quote;
         }
+        else if (ch == '\\') {
+            in_quote = 1;
+        }
         else if (ch == json_quote_char) {
             in_string = !in_string;
         }
@@ -347,6 +350,9 @@ void perl_json_postprocess(SV *sv) {
         *pos++ = ch;
         if (in_quote) {
             in_quote = !in_quote;
+        }
+        else if (ch == '\\') {
+            in_quote = 1;
         }
         else if (ch == json_quote_char) {
             in_string = !in_string;
@@ -468,14 +474,18 @@ void perl_syck_emitter_handler(SyckEmitter *e, st_data_t data) {
         syck_emit_scalar(e, OBJOF("string"), SCALAR_NUMBER, 0, 0, 0, SvPV_nolen(sv), sv_len(sv));
     }
     else if (SvPOK(sv)) {
-        if (COND_FOLD(sv)) {
+        STRLEN len = sv_len(sv);
+        if (len == 0) {
+            syck_emit_scalar(e, OBJOF("string"), SCALAR_QUOTED, 0, 0, 0, "", 0);
+        }
+        else if (COND_FOLD(sv)) {
             enum scalar_style old_s = e->style;
             e->style = SCALAR_UTF8;
-            syck_emit_scalar(e, OBJOF("string"), SCALAR_STRING, 0, 0, 0, SvPV_nolen(sv), sv_len(sv));
+            syck_emit_scalar(e, OBJOF("string"), SCALAR_STRING, 0, 0, 0, SvPV_nolen(sv), len);
             e->style = old_s;
         }
         else {
-            syck_emit_scalar(e, OBJOF("string"), SCALAR_STRING, 0, 0, 0, SvPV_nolen(sv), sv_len(sv));
+            syck_emit_scalar(e, OBJOF("string"), SCALAR_STRING, 0, 0, 0, SvPV_nolen(sv), len);
         }
     }
     else {
